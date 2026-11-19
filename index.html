@@ -112,6 +112,17 @@ header .who span{font-size:12px;color:var(--mute)}
 .preview{width:100%;border-radius:14px;margin-top:10px;display:block}
 .fileBtn{display:block;text-align:center;border:2px dashed #3a4274;border-radius:12px;padding:12px;color:var(--mute);font-weight:700;cursor:pointer}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+.fighters .sb{flex:1;border-radius:14px;padding:8px 10px;background:rgba(18,23,44,.85);border:2px solid transparent}
+.fighters .sb b{display:block;font-size:15px;font-weight:900}.fighters .sb span{font-size:11px;color:var(--mute)}
+.fighters .sb.me{border-color:var(--red)}.fighters .sb.opp{border-color:var(--blue)}
+.bar.r i{background:linear-gradient(90deg,var(--red),var(--gold))}.bar.b i{background:linear-gradient(90deg,var(--blue),#6fd3ff)}
+.pct b{color:var(--paper)}.lt{color:#ff8a85;font-weight:700}
+.dayh{margin:12px 0 2px;font-weight:900;color:var(--gold);font-size:14px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:3px}
+.c{font-style:normal;font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;background:#0b0f1f;color:var(--mute)}
+.c.done{color:var(--ok)}.c.late{color:#ff8a85;background:rgba(229,50,45,.18)}.c.doneLate{color:#ffb347;background:rgba(255,179,71,.15)}
+.item .m span a{display:inline-block}
 </style>
 </head>
 <body>
@@ -167,13 +178,12 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const safeUrl = u => /^https?:\/\//i.test(u) ? u : '';
 
 let me = JSON.parse(localStorage.getItem('hm_me') || 'null');
-let db = { users: [], schedules: [], items: [] };
+let db = { users: [], schedules: [], items: [], joins: [], progress: [] };
 let tab = 'daily';
-let viewUid = null;      // whose schedules are shown
-let busy = 0;
+let started = false;
 
 async function api(action, data = {}) {
-  if (!API_URL) throw new Error('حط رابط الـ Web app في API_URL');
+  if (!API_URL) throw new Error('رابط الـ Web app مش موجود');
   setDot('busy');
   try {
     const r = await fetch(API_URL, { method: 'POST', body: JSON.stringify({ action, ...data }) });
@@ -209,68 +219,139 @@ $('#logout').onclick = () => { localStorage.removeItem('hm_me'); me = null; loca
 
 function enter() {
   $('#login').classList.add('hidden'); $('#main').classList.remove('hidden');
-  $('#meName').textContent = me.name; viewUid = me.id;
-  refresh(); setInterval(() => { if (!document.querySelector('.modal')) refresh(); }, 15000);
+  $('#meName').textContent = me.name;
+  refresh();
+  if (!started) {
+    started = true;
+    setInterval(() => { if (!document.querySelector('.modal')) refresh(); }, 15000);
+    setInterval(() => { if (!document.querySelector('.modal')) render(); }, 60000); // علشان "متأخر" يظهر في وقته
+  }
 }
 async function refresh() {
   try { db = await api('getAll'); render(); } catch (e) { /* offline: keep what we have */ }
 }
 
+/* ---------- logic: join / due / late ---------- */
+const opp = () => db.users.find(u => u.id !== me.id);
+const uname = id => (db.users.find(u => u.id === id) || {}).name || '؟';
+const joined = (sid, uid) => db.joins.some(j => j.scheduleId === sid && j.userId === uid);
+const prog = (iid, uid) => db.progress.find(p => p.itemId === iid && p.userId === uid);
+function dateOf(s, off) {
+  const m = /^(\d+)-(\d+)-(\d+)$/.exec(s.dateOrWeek || '');
+  const n = new Date();
+  const [y, mo, d] = m ? [+m[1], +m[2], +m[3]] : [n.getFullYear(), n.getMonth() + 1, n.getDate()];
+  return new Date(y, mo - 1, d + (+off || 0));
+}
+function dueOf(s, i) {
+  const d = dateOf(s, s.type === 'weekly' ? i.day : 0);
+  const m = /^(\d+):(\d+)/.exec(i.time || '');
+  if (m) d.setHours(+m[1], +m[2], 0, 0); else d.setHours(23, 59, 59, 0);
+  return d;
+}
+// done | doneLate | late | pending
+function statusOf(s, i, uid) {
+  const p = prog(i.id, uid), due = dueOf(s, i);
+  if (p && p.done) return new Date(p.doneAt) > due ? 'doneLate' : 'done';
+  return new Date() > due ? 'late' : 'pending';
+}
+const ICON = { done: '✅', doneLate: '⚠️', late: '⏰', pending: '⏳' };
+const TXT = { done: 'خلّص', doneLate: 'سلّم متأخر', late: 'متأخر', pending: 'لسه' };
+const dayName = (s, i) => dateOf(s, i.day).toLocaleDateString('ar-EG', { weekday: 'long' });
+
+function stats(uid) {
+  let done = 0, late = 0;
+  db.schedules.forEach(s => {
+    if (!joined(s.id, uid)) return;
+    db.items.filter(i => i.scheduleId === s.id).forEach(i => {
+      const st = statusOf(s, i, uid);
+      if (st === 'done' || st === 'doneLate') done++;
+      if (st === 'late' || st === 'doneLate') late++;
+    });
+  });
+  return { done, late };
+}
+
 /* ---------- render ---------- */
-function opp() { return db.users.find(u => u.id !== me.id); }
 function render() {
-  const o = opp();
+  const o = opp(), a = stats(me.id), b = o ? stats(o.id) : null;
   $('#fighters').innerHTML =
-    `<button class="me ${viewUid === me.id ? 'on' : ''}" data-u="${me.id}">${esc(me.name)}<small>جدولي</small></button>` +
-    (o ? `<button class="opp ${viewUid === o.id ? 'on' : ''}" data-u="${o.id}">${esc(o.name)}<small>جدول الخصم</small></button>`
-       : `<button class="opp" disabled>مستني الخصم…<small>لسه محدش دخل</small></button>`);
-  const mine = viewUid === me.id;
-  const scs = db.schedules.filter(s => s.userId === viewUid && s.type === tab).reverse();
-  $('#newSched').classList.toggle('hidden', !mine);
+    `<div class="sb me"><b>${esc(me.name)}</b><span>خلّص ${a.done} · متأخر ${a.late}</span></div>` +
+    (o ? `<div class="sb opp"><b>${esc(o.name)}</b><span>خلّص ${b.done} · متأخر ${b.late}</span></div>`
+       : `<div class="sb opp"><b>مستني الخصم…</b><span>لسه محدش دخل</span></div>`);
+
+  const scs = db.schedules.filter(s => s.type === tab).reverse();
   if (!scs.length) {
-    $('#list').innerHTML = `<div class="empty">${mine ? 'مفيش جداول لسه.<br>اضغط «إنشاء جدول» وابدأ ضيف موادك.' : 'الخصم لسه ما عملش جدول هنا.'}</div>`;
+    $('#list').innerHTML = `<div class="empty">مفيش جداول لسه.<br>اضغط «إنشاء جدول» — وهيظهر للاتنين.</div>`;
     return;
   }
   $('#list').innerHTML = scs.map(s => {
-    const its = db.items.filter(i => i.scheduleId === s.id).sort((a, b) => a.time.localeCompare(b.time));
-    const dn = its.filter(i => i.done).length, pc = its.length ? Math.round(dn / its.length * 100) : 0;
-    return `<div class="sched ${mine ? 'mine' : 'theirs'}" data-s="${s.id}">
-      <div class="sh"><h3>${esc(s.title)}<small>${esc(s.dateOrWeek)}</small></h3>
-        ${mine ? `<button class="x" data-act="delSched" data-id="${s.id}" aria-label="حذف الجدول">🗑</button>` : ''}</div>
-      <div class="bar"><i style="width:${pc}%"></i></div>
-      <div class="pct">خلّص ${dn} من ${its.length} — ${pc}%</div>
-      ${its.map(i => `<div class="item ${i.done ? 'done' : ''}">
+    const its = db.items.filter(i => i.scheduleId === s.id)
+      .sort((x, y) => (s.type === 'weekly' ? (+x.day - +y.day) : 0) || x.time.localeCompare(y.time));
+    const mine = s.userId === me.id, inMe = joined(s.id, me.id);
+    const bars = db.users.filter(u => joined(s.id, u.id)).map(u => {
+      const dn = its.filter(i => { const t = statusOf(s, i, u.id); return t === 'done' || t === 'doneLate'; }).length;
+      const lt = its.filter(i => { const t = statusOf(s, i, u.id); return t === 'late' || t === 'doneLate'; }).length;
+      const pc = its.length ? Math.round(dn / its.length * 100) : 0;
+      return `<div class="pct"><b>${esc(u.name)}</b> — ${dn}/${its.length}${lt ? ` · <span class="lt">متأخر ${lt}</span>` : ''}</div>
+              <div class="bar ${u.id === me.id ? 'r' : 'b'}"><i style="width:${pc}%"></i></div>`;
+    }).join('');
+    let lastDay = null;
+    const rowsHtml = its.map(i => {
+      let head = '';
+      if (s.type === 'weekly' && i.day !== lastDay) { lastDay = i.day; head = `<div class="dayh">${esc(dayName(s, i))}</div>`; }
+      const o2 = opp(), sm = inMe ? statusOf(s, i, me.id) : null;
+      const so = o2 && joined(s.id, o2.id) ? statusOf(s, i, o2.id) : null;
+      const pm = prog(i.id, me.id), po = o2 ? prog(i.id, o2.id) : null;
+      const proofs = [pm, po].filter(Boolean).map(p => (safeUrl(p.proofLink) ? `<a href="${esc(p.proofLink)}" target="_blank" rel="noopener">📎 إثبات ${esc(uname(p.userId))}</a>` : '') +
+        (safeUrl(p.proofImg) ? `<a href="${esc(p.proofImg)}" target="_blank" rel="noopener"><img src="${esc(p.proofImg)}" alt="" loading="lazy"></a>` : '')).join('');
+      return head + `<div class="item ${sm === 'done' || sm === 'doneLate' ? 'done' : ''}">
         <div class="t">${esc(i.time) || '--:--'}</div>
         <div class="m"><b>${esc(i.subject)}</b>
           ${i.lesson ? `<span>${esc(i.lesson)}</span>` : ''}
-          <span>${safeUrl(i.link) ? `<a href="${esc(i.link)}" target="_blank" rel="noopener">🔗 المحاضرة</a>` : ''}${safeUrl(i.proofLink) ? `<a href="${esc(i.proofLink)}" target="_blank" rel="noopener">📎 إثبات</a>` : ''}</span>
-          ${safeUrl(i.proofImg) ? `<a href="${esc(i.proofImg)}" target="_blank" rel="noopener"><img src="${esc(i.proofImg)}" alt="" loading="lazy"></a>` : ''}</div>
-        ${mine ? `<button class="btn3d sm ${i.done ? 'grey' : 'green'}" data-act="${i.done ? 'undo' : 'done'}" data-id="${i.id}">${i.done ? 'تراجع' : 'خلصت'}</button>
-                  <button class="x" data-act="delItem" data-id="${i.id}" aria-label="حذف المادة">✕</button>`
-               : `<span class="tick">${i.done ? '✅' : '⏳'}</span>`}
-      </div>`).join('')}
-      ${mine ? `<div class="row"><button class="btn3d sm blue" data-act="addItem" data-id="${s.id}">＋ مادة</button>
-        <button class="btn3d sm gold" data-act="export" data-id="${s.id}">🖼 صورة الجدول</button></div>`
-             : `<div class="row"><button class="btn3d sm gold" data-act="export" data-id="${s.id}">🖼 صورة الجدول</button></div>`}
+          <span class="chips">${sm ? `<em class="c ${sm}">أنا: ${ICON[sm]} ${TXT[sm]}</em>` : ''}${so ? `<em class="c ${so}">${esc(o2.name)}: ${ICON[so]}</em>` : ''}</span>
+          ${safeUrl(i.link) ? `<span><a href="${esc(i.link)}" target="_blank" rel="noopener">🔗 المحاضرة</a></span>` : ''}
+          ${proofs ? `<span>${proofs}</span>` : ''}</div>
+        ${inMe ? `<button class="btn3d sm ${sm === 'done' || sm === 'doneLate' ? 'grey' : 'green'}" data-act="${sm === 'done' || sm === 'doneLate' ? 'undo' : 'done'}" data-id="${i.id}">${sm === 'done' || sm === 'doneLate' ? 'تراجع' : 'خلصت'}</button>` : ''}
+        ${mine ? `<button class="x" data-act="delItem" data-id="${i.id}" aria-label="حذف المادة">✕</button>` : ''}
+      </div>`;
+    }).join('');
+    return `<div class="sched ${inMe ? 'mine' : 'theirs'}">
+      <div class="sh"><h3>${esc(s.title)}<small>${esc(s.dateOrWeek)} — عمله ${esc(uname(s.userId))}</small></h3>
+        ${mine ? `<button class="x" data-act="delSched" data-id="${s.id}" aria-label="حذف الجدول">🗑</button>` : ''}</div>
+      ${bars}
+      ${rowsHtml || '<div class="pct">لسه مفيش مواد في الجدول ده</div>'}
+      <div class="row">
+        ${inMe ? '' : `<button class="btn3d gold" data-act="start" data-id="${s.id}">▶ ابدأ الجدول</button>`}
+        ${mine ? `<button class="btn3d sm blue" data-act="addItem" data-id="${s.id}">＋ مادة</button>` : ''}
+        <button class="btn3d sm ${inMe ? 'gold' : 'grey'}" data-act="export" data-id="${s.id}">🖼 صورة</button>
+      </div>
     </div>`;
   }).join('');
 }
 
 document.addEventListener('click', e => {
-  const f = e.target.closest('.fighters button[data-u]'); if (f) { viewUid = f.dataset.u; render(); return; }
   const t = e.target.closest('.tabs button'); if (t) {
     tab = t.dataset.tab; document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b === t)); render(); return; }
   const a = e.target.closest('[data-act]'); if (!a) return;
   const id = a.dataset.id, act = a.dataset.act;
-  if (act === 'addItem') openItem(id);
+  if (act === 'start') startSchedule(id);
+  else if (act === 'addItem') openItem(id);
   else if (act === 'done') openDone(id);
-  else if (act === 'undo') setDone(id, false);
-  else if (act === 'delItem') { if (confirm('تمسح المادة؟')) del('deleteItem', { id }, () => db.items = db.items.filter(i => i.id !== id)); }
-  else if (act === 'delSched') { if (confirm('تمسح الجدول بكل مواده؟')) del('deleteSchedule', { id }, () => { db.schedules = db.schedules.filter(s => s.id !== id); db.items = db.items.filter(i => i.scheduleId !== id); }); }
+  else if (act === 'undo') setDone(id, false).catch(() => {});
+  else if (act === 'delItem') { if (confirm('تمسح المادة؟')) del('deleteItem', { id }, () => { db.items = db.items.filter(i => i.id !== id); db.progress = db.progress.filter(p => p.itemId !== id); }); }
+  else if (act === 'delSched') { if (confirm('تمسح الجدول بكل مواده؟ هيتمسح عند الاتنين.')) del('deleteSchedule', { id }, () => {
+    const ids = db.items.filter(i => i.scheduleId === id).map(i => i.id);
+    db.schedules = db.schedules.filter(s => s.id !== id); db.items = db.items.filter(i => i.scheduleId !== id);
+    db.joins = db.joins.filter(j => j.scheduleId !== id); db.progress = db.progress.filter(p => ids.indexOf(p.itemId) < 0); }); }
   else if (act === 'export') exportImage(id);
 });
 $('#newSched').onclick = openSched;
 
+async function startSchedule(sid) {
+  db.joins.push({ scheduleId: sid, userId: me.id, startedAt: new Date().toISOString() }); render();
+  try { await api('startSchedule', { userId: me.id, scheduleId: sid }); toast('يلا ابدأ! 🥊'); }
+  catch (e) { db.joins = db.joins.filter(j => !(j.scheduleId === sid && j.userId === me.id)); render(); toast(e.message); }
+}
 async function del(action, data, local) {
   local(); render();
   try { await api(action, { ...data, userId: me.id }); } catch (e) { toast(e.message); refresh(); }
@@ -283,10 +364,11 @@ function modal(html) {
   return h.querySelector('.sheet');
 }
 function closeModal() { $('#modalHost').innerHTML = ''; }
-function today() { return new Date().toISOString().slice(0, 10); }
+function today() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 
 function openSched() {
   const s = modal(`<h2>جدول جديد</h2>
+    <div class="opt">هيظهر لحليم وملاك الاتنين</div>
     <label>اسم الجدول</label><input id="sTitle" placeholder="مثال: مذاكرة الفيزياء">
     <div class="two"><div><label>النوع</label><select id="sType"><option value="daily">يومي</option><option value="weekly">أسبوعي</option></select></div>
     <div><label id="sDl">التاريخ</label><input id="sDate" type="date" value="${today()}"></div></div>
@@ -310,9 +392,12 @@ function openSched() {
 }
 
 function openItem(scheduleId) {
+  const sc = db.schedules.find(x => x.id === scheduleId);
+  const dayOpts = [0, 1, 2, 3, 4, 5, 6].map(k => `<option value="${k}">${esc(dateOf(sc, k).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'numeric' }))}</option>`).join('');
   const s = modal(`<h2>إضافة مادة</h2>
     <label>المادة</label><input id="iSub" placeholder="مثال: كيمياء">
-    <div class="two"><div><label>الساعة</label><input id="iTime" type="time"></div>
+    ${sc.type === 'weekly' ? `<label>اليوم</label><select id="iDay">${dayOpts}</select>` : ''}
+    <div class="two"><div><label>الساعة (آخر ميعاد للتسليم)</label><input id="iTime" type="time"></div>
     <div><label>اسم الدرس <span class="opt">(اختياري)</span></label><input id="iLes" placeholder="الدرس الثالث"></div></div>
     <label>لينك المحاضرة <span class="opt">(اختياري)</span></label><input id="iLink" type="url" inputmode="url" placeholder="https://…" style="direction:ltr;text-align:left">
     <div class="err" id="iErr"></div>
@@ -321,11 +406,12 @@ function openItem(scheduleId) {
     const subject = s.querySelector('#iSub').value.trim();
     if (!subject) { s.querySelector('#iErr').textContent = 'اكتب اسم المادة'; return; }
     const time = s.querySelector('#iTime').value, lesson = s.querySelector('#iLes').value.trim(), link = s.querySelector('#iLink').value.trim();
+    const day = s.querySelector('#iDay') ? s.querySelector('#iDay').value : '0';
     if (link && !safeUrl(link)) { s.querySelector('#iErr').textContent = 'اللينك لازم يبدأ بـ https://'; return; }
     s.querySelector('#iOk').disabled = true;
     try {
-      const r = await api('addItem', { userId: me.id, scheduleId, subject, time, lesson, link });
-      db.items.push({ id: r.id, scheduleId, userId: me.id, subject, time, lesson, link, done: false });
+      const r = await api('addItem', { userId: me.id, scheduleId, subject, day, time, lesson, link });
+      db.items.push({ id: r.id, scheduleId, userId: me.id, subject, day, time, lesson, link });
       closeModal(); render();
     } catch (e) { s.querySelector('#iErr').textContent = e.message; s.querySelector('#iOk').disabled = false; }
   };
@@ -333,8 +419,10 @@ function openItem(scheduleId) {
 
 function openDone(id) {
   let img = null;
-  const it = db.items.find(i => i.id === id);
+  const it = db.items.find(i => i.id === id), sc = db.schedules.find(x => x.id === it.scheduleId);
+  const late = statusOf(sc, it, me.id) === 'late';
   const s = modal(`<h2>خلصت ${esc(it.subject)}؟ 💪</h2>
+    ${late ? '<div class="err">⏰ الميعاد عدّى — هتتسجل «سلّم متأخر».</div>' : ''}
     <div class="opt">كل اللي تحت اختياري</div>
     <label>لينك المحاضرة اللي سمعتها</label><input id="dLink" type="url" inputmode="url" placeholder="https://…" style="direction:ltr;text-align:left">
     <label>صورة اللي ذاكرته</label>
@@ -357,14 +445,19 @@ function openDone(id) {
 }
 
 async function setDone(id, done, extra = {}) {
-  const it = db.items.find(i => i.id === id); const old = { ...it };
-  it.done = done; if (!done) { it.proofLink = ''; } render();
+  let p = prog(id, me.id); const old = p ? { ...p } : null;
+  if (!p) { p = { itemId: id, userId: me.id, done: false, doneAt: '', proofLink: '', proofImg: '', note: '' }; db.progress.push(p); }
+  p.done = done; p.doneAt = done ? new Date().toISOString() : ''; render();
   try {
     const r = await api('setDone', { userId: me.id, itemId: id, done, ...extra });
-    if (r && r.proofImg) it.proofImg = r.proofImg;
-    if (extra.proofLink) it.proofLink = extra.proofLink;
+    if (r && r.proofImg) p.proofImg = r.proofImg;
+    if (r && r.doneAt) p.doneAt = r.doneAt;
+    if (extra.proofLink) p.proofLink = extra.proofLink;
     render();
-  } catch (e) { Object.assign(it, old); render(); toast(e.message); throw e; }
+  } catch (e) {
+    if (old) Object.assign(p, old); else db.progress = db.progress.filter(x => x !== p);
+    render(); toast(e.message); throw e;
+  }
 }
 
 function shrink(file, max = 1000) {
@@ -381,54 +474,50 @@ function shrink(file, max = 1000) {
 /* ---------- export schedule as image ---------- */
 async function exportImage(sid) {
   const s = db.schedules.find(x => x.id === sid);
-  const its = db.items.filter(i => i.scheduleId === sid).sort((a, b) => a.time.localeCompare(b.time));
-  const owner = db.users.find(u => u.id === s.userId);
+  const its = db.items.filter(i => i.scheduleId === sid)
+    .sort((a, b) => (s.type === 'weekly' ? (+a.day - +b.day) : 0) || a.time.localeCompare(b.time));
+  const inMe = joined(sid, me.id);
   try { await document.fonts.load('900 40px Cairo'); await document.fonts.load('80px "Bebas Neue"'); } catch (e) {}
   const W = 1080, rowH = its.length > 9 ? 96 : 118, tableTop = 520;
   const H = Math.max(1920, tableTop + its.length * rowH + 360);
   const c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d');
 
-  // ring background
   g.fillStyle = '#0e1220'; g.fillRect(0, 0, W, H);
   let gr = g.createRadialGradient(0, 0, 0, 0, 0, 1300); gr.addColorStop(0, 'rgba(229,50,45,.55)'); gr.addColorStop(1, 'rgba(229,50,45,0)');
   g.fillStyle = gr; g.fillRect(0, 0, W, H);
   gr = g.createRadialGradient(W, H, 0, W, H, 1500); gr.addColorStop(0, 'rgba(45,107,229,.6)'); gr.addColorStop(1, 'rgba(45,107,229,0)');
   g.fillStyle = gr; g.fillRect(0, 0, W, H);
 
-  // vertical names on the sides
   g.font = '300px "Bebas Neue", Impact, sans-serif'; g.textAlign = 'center'; g.lineWidth = 5; g.direction = 'ltr';
   g.save(); g.translate(150, H / 2); g.rotate(-Math.PI / 2); g.strokeStyle = 'rgba(229,50,45,.8)'; g.strokeText('HALIM', 0, 100); g.restore();
   g.save(); g.translate(W - 150, H / 2); g.rotate(Math.PI / 2); g.strokeStyle = 'rgba(45,107,229,.9)'; g.strokeText('MALAK', 0, 100); g.restore();
 
-  // gloves facing each other
   g.font = '520px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif'; g.textBaseline = 'middle'; g.globalAlpha = .32;
   g.save(); g.translate(250, H / 2); g.scale(-1, 1); g.fillText('🥊', 0, 0); g.restore();
   g.save(); g.translate(W - 250, H / 2); g.fillText('🥊', 0, 0); g.restore();
   g.globalAlpha = 1;
   g.font = '130px "Bebas Neue",Impact,sans-serif'; g.fillStyle = '#f5b82e'; g.fillText('VS', W / 2, 150);
 
-  // title
   g.textBaseline = 'alphabetic'; g.direction = 'rtl'; g.textAlign = 'center';
   g.fillStyle = '#f2ead8'; g.font = '900 78px Cairo, sans-serif';
   g.fillText(s.title, W / 2, 330, W - 340);
   g.fillStyle = '#9aa3c2'; g.font = '700 40px Cairo, sans-serif';
-  g.fillText((s.type === 'weekly' ? 'جدول أسبوعي' : 'جدول يومي') + (s.dateOrWeek ? ' — ' + s.dateOrWeek : '') + (owner ? ' — ' + owner.name : ''), W / 2, 400, W - 340);
+  g.fillText((s.type === 'weekly' ? 'جدول أسبوعي' : 'جدول يومي') + (s.dateOrWeek ? ' — ' + s.dateOrWeek : ''), W / 2, 400, W - 340);
 
-  // table
   const x0 = 210, tw = W - 420;
   its.forEach((i, k) => {
-    const y = tableTop + k * rowH;
+    const y = tableTop + k * rowH, st = inMe ? statusOf(s, i, me.id) : null;
     g.fillStyle = 'rgba(14,18,32,.88)'; rr(g, x0, y, tw, rowH - 14, 22); g.fill();
-    g.strokeStyle = i.done ? 'rgba(47,191,113,.8)' : 'rgba(245,184,46,.55)'; g.lineWidth = 3; rr(g, x0, y, tw, rowH - 14, 22); g.stroke();
+    g.strokeStyle = st === 'done' ? 'rgba(47,191,113,.8)' : st === 'late' || st === 'doneLate' ? 'rgba(229,50,45,.85)' : 'rgba(245,184,46,.55)';
+    g.lineWidth = 3; rr(g, x0, y, tw, rowH - 14, 22); g.stroke();
     const cy = y + (rowH - 14) / 2;
     g.textBaseline = 'middle';
-    g.direction = 'ltr'; g.textAlign = 'left'; g.fillStyle = '#f5b82e'; g.font = '900 44px Cairo, sans-serif';
-    g.fillText(i.time || '--:--', x0 + 26, cy);
-    g.direction = 'rtl'; g.textAlign = 'right'; g.fillStyle = '#f2ead8'; g.font = '900 44px Cairo, sans-serif';
-    const label = i.lesson ? `${i.subject} — ${i.lesson}` : i.subject;
-    g.fillText(label, x0 + tw - 26, cy, tw - 260);
+    g.direction = 'rtl'; g.textAlign = 'left'; g.fillStyle = '#f5b82e'; g.font = '900 ' + (s.type === 'weekly' ? 34 : 44) + 'px Cairo, sans-serif';
+    g.fillText((s.type === 'weekly' ? dayName(s, i) + ' ' : '') + (i.time || ''), x0 + 26, cy, 230);
+    g.textAlign = 'right'; g.fillStyle = '#f2ead8'; g.font = '900 44px Cairo, sans-serif';
+    g.fillText(i.lesson ? `${i.subject} — ${i.lesson}` : i.subject, x0 + tw - 26, cy, tw - 380);
     g.textAlign = 'center'; g.direction = 'ltr'; g.font = '44px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
-    g.fillText(i.done ? '✅' : '⬜', x0 + 190, cy);
+    g.fillText(st ? ICON[st] : '⬜', x0 + 310, cy);
   });
   if (!its.length) { g.textAlign = 'center'; g.fillStyle = '#9aa3c2'; g.font = '700 44px Cairo'; g.fillText('لسه مفيش مواد', W / 2, tableTop + 60); }
 
